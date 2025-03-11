@@ -1,0 +1,836 @@
+
+---
+title: "modulo1_preprocesado_datos_R_Manuel_Berea_Arellano"
+output:
+  html_document:
+    toc: true
+---
+
+# Evalución 2025 - Módulo 1 - Preprocesado de datos
+Manuel Berea Arellano
+En el siguiente cuaderno estarán todos los ejercicios pedidos en R para Preprocesado de datos.
+
+
+```{r  }
+R.version.string
+```
+
+
+```{r message=FALSE }
+library(arrow)
+library(tidyverse) ## dplyr, ggplot, etc.
+library(skimr)
+library(DataExplorer)
+library(gridExtra)
+library(solitude)
+library(corrplot)
+library(minerva)
+library(DescTools)
+library(mice)
+library(sampling)
+library(formattable)
+
+# Configuración de dimensiones de los gráficos
+knitr::opts_chunk$set(fig.width = 20, fig.height = 16)
+```
+
+
+## Prepocesado de datos
+
+Cargamos los datos
+
+
+
+```{r }
+path <- "~/Universidad/Master Uned/Master_Uned/Modulo 1/parkinsons_disease_data.parquet"
+df <- as.data.frame(read_parquet(path))
+head(df)
+```
+
+
+### 1. Análisis exploratorio de datos (EDA)
+Vamos a dividir este primer apartado en varios puntos:
+- Análisis descriptivo
+- Análisis de relacción entre variables
+
+#### 1.1 Análisis descriptivo
+
+En este primer apartado queremos ver que cantidad de observaciones tenemos, cuantas variables, de que tipo son, etc. En caso de ser necesario haremos un cambio del tipo de variable en este punto, ya que la inferencia de esquema no siempre funciona correctamente, sobre todo con variables categoricas que tienen valor numerico.
+
+
+
+```{r }
+glimpse(df)    # Ver estructura de las columnas
+```
+
+
+Con la función glimpse podemos mirar la dimensión, el nombre de las columnas, el tipo de variable y algun valor ejemplo que nos encontramos en las primeras observaciones. Utilizando esta función ya podemos ver que hay variables que aparecen como INT y en realidad son variables categoricas.
+A continuación vamos a cambiar a variables categoricas que las que lo deben ser y veremos con skim una primera visión del conjunto de datos.
+
+
+
+```{r }
+# Las variables que deben de ser factor
+variables_factor <- c("Gender","Ethnicity","EducationLevel","Smoking","FamilyHistoryParkinsons","TraumaticBrainInjury","Hypertension","Diabetes","Depression","Stroke","Tremor","Rigidity","Bradykinesia","PosturalInstability","SpeechProblems","SleepDisorders","Constipation","Diagnosis")
+variables_numeric <- setdiff(names(df), variables_factor)
+
+df <- df %>%
+        mutate_at(vars(variables_factor), as.factor) %>%
+        mutate(PatientID = paste0("P_",PatientID)) # Modificamos la variable ID para que no sea numérica.
+
+variables_numeric <- variables_numeric[-which(variables_numeric == "PatientID")]
+variables_factor <- variables_factor[-which(variables_factor == "Diagnosis")]
+
+skim(df)
+```
+
+
+La función skim nos proporciona una visión rápida de los datos, podemos ver el numero de filas y columnas, vemos que tenemos 18 columnas categoricas y 15 numericas. En un primer vistazo apreciamos que tenemos valores faltantes en algunas de las variables tanto numéricas como categoricas, todas las variables que presentan valores faltantes tienen mas de un 5% de los valores faltantes, por que tendremos que ver la estrategia para tratarlos. Se aprecia descompensación en las variables categoricas con algunas de las categorías poco representatas. Otra cosa a destacar que la mediana y la media parece estar una cerca de la otra.
+
+
+#### Distribución de variables numéricas
+A continuación vamos a examinar variable a variable con gráficos, ya que nos dará una idea más exacta a que tipo de distribuciones nos enfrentamos.
+
+```{r }
+plot_histogram(df)
+```
+
+Parece que en general las variables numericas siguen una distribución uniforme y en algun caso multimodal. Para ver si alguna de ellas sigue una distribución normal podríamos utilizar el test de chi-cuadrado ya que la muestra es grande.
+
+
+```{r }
+resultados <- data.frame(Variable = character(),
+                         N_Bins = numeric(),
+                         P_Value = numeric(),
+                         Aceptado = character(),
+                         stringsAsFactors = FALSE)
+for(variable in variables_numeric){
+  N_Bins <- nclass.Sturges(df[, variable])
+  hist_obj <- hist(df[, variable], breaks = N_Bins, plot = FALSE)
+  observed <- hist_obj$counts  
+  expected <- rep(sum(observed) / length(observed), length(observed))  
+  
+  # Ejecutar test de Chi-cuadrado
+  test_result <- chisq.test(observed, p = expected / sum(expected))
+  p_value <- test_result$p.value
+  
+  # Determinar si aceptamos la hipótesis nula
+  aceptado <- ifelse(p_value > 0.05, "Sí", "No")
+
+  resultados <- rbind(resultados, data.frame(Variable = variable, 
+                                             N_Bins = N_Bins,
+                                             P_Value = p_value, 
+                                             Aceptado = aceptado))
+}
+resultados %>% arrange(-P_Value)
+```
+
+Con el test de la chi-cuadrado podemos confirmar que las variables SystolicBP, AlcoholConsumption, Age, BMI no siguen una distribución normal, el resto de ellas no podemos rechazar la hipotesis nula, por lo que es posible que si. Repetiremos el test despues de eleminar datos faltantes para comprobar si esto sigue siendo así.
+
+
+##### Distribución de variables categóricas
+Ahora vamos a comprobar graficamente las variables categoricas con gráficos de barras.
+
+
+```{r }
+# Crear una lista de gráficos con ggplot
+plots_cat <- lapply(variables_factor, function(var) {
+  ggplot(df, aes_string(x = var, fill = var)) +
+    geom_bar(aes(y = (..count..)/sum(..count..) * 100), stat = "count") +
+    labs(title = var, x = var, y = "Frecuencia (%)") +
+    theme_minimal() +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 6),  
+      axis.text.y = element_text(size = 6),  
+      axis.title.x = element_text(size = 6),  
+      axis.title.y = element_text(size = 6),  
+      plot.title = element_text(size = 10),  
+      legend.text = element_text(size = 6), 
+      legend.title = element_text(size = 8),  
+      legend.key.size = unit(0.5,"cm"),
+      plot.margin = margin(3, 3, 3, 3))  
+  })
+do.call(grid.arrange, c(plots_cat, ncol = 4, nrow = 5))
+```
+
+Podemos apreciar como en muchas de las variables predomina una categoria sobre el resto, al tratarse de categorias bien representadas con mas del 10% de datos no tenemos que preocuparnos por ajustarlas, excepto con la variable Stroke que una de las categorías tiene muy poca frecuencia. Debemos asegurarnos de comprobar si esta variable es relevante comparando con la variable objetivo y en caso de que si, valorar una compensación de variables.
+
+```{r fig.width=6, fig.height=4 ,}
+ggplot(df, aes_string(x = "Diagnosis", fill = "Diagnosis")) +
+    geom_bar(aes(y = (..count..)/sum(..count..) * 100), stat = "count") +
+    labs(title = "Diagnosis", x = "Diagnosis", y = "Frecuencia (%)") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+La variable objetivo (Diagnosis) parece que tiene uno de los grupos con mayor cantidad de observaciones, ajustaremos también esta variable para mantener una frecuencia equilibrada.
+
+
+##### Detección de valores atípicos
+
+Para la detección de valores atipicos podemos utilizar métodos univariantes y multivariantes. Como nos encontramos ante distribuciones que no son normales, vamos a utilizar los métodos de rango intercuartílico para los métodos univariantes y isolation forest para multivariante.
+
+Para el método de IQR vamos a calcular el primer y tercer cuartil, el método nos dice que establecemos un rango donde deben estar todos los valores, todos aquellos que se encuentren fuera se considerarán outliers.
+
+
+```{r }
+outliers_summary <- lapply(variables_numeric, function(var) {
+  Q1 <- quantile(df[[var]], 0.25, na.rm = TRUE)
+  Q3 <- quantile(df[[var]], 0.75, na.rm = TRUE)
+  IQR_value <- Q3 - Q1
+  lower_bound <- Q1 - 1.5 * IQR_value
+  upper_bound <- Q3 + 1.5 * IQR_value
+  
+  num_outliers <- sum(df[[var]] < lower_bound | df[[var]] > upper_bound, na.rm = TRUE)
+  
+  return(data.frame(Variable = var, Num_Outliers = num_outliers))
+})
+  
+outliers_summary_df <- do.call(rbind, outliers_summary)
+outliers_summary_df
+```
+
+Este método nos muestra que no tenemos outliers de forma individual por variable, debemos comprobar tambien si en conjunto con todas las variables, alguna de las observaciones son outliers. Utilizaremos Isolation Forest debido a que no asume normalidad, el escalable con grandes volumenes de datos, como contra, necesitamos calibrar los parámetros y aislar los casos para comprobar si son verdaderamente outliers. Otro problema con el que nos enfrentamos es que no acepta valores nulos, como aun no hemos imputado, voy a eliminar los valores na y más adelante con la imputación podemos comparar y decidir si los valores atípicos (en caso de que existan) no debemos tenerlos encuenta.
+
+
+```{r }
+detect_outliers_solitude <- function(df, variables_numeric) {
+  df_numeric <- df[ , variables_numeric, drop = FALSE]
+  df_numeric <- na.omit(df_numeric)  # Manejo de NA
+
+  iso_forest <- isolationForest$new()
+  iso_forest$fit(df_numeric)
+
+  scores <- iso_forest$predict(df_numeric)$anomaly_score 
+
+  threshold <- quantile(scores, 0.95)  
+  df_outliers <- df_numeric[scores > threshold, ] 
+  
+  return(df_outliers)
+}
+
+outliers_solitude <- detect_outliers_solitude(df, variables_numeric)
+cat("----\n")
+print("Outliers detectados por el método isolation forest")
+glimpse(outliers_solitude)
+```
+
+
+El método ha detectado 67 outliers que sobre la muestra total de 2105 hacen un 3% de la muestra. Vamos a guardar este dataframe y volveremos a ejecutar estre proceso tras imputar los datos, ya que puede variar al introducir los datos faltantes. Otro, punto a tener en cuenta es que hemos considerado como threshold para filtrar los scores por encima del 95% del quantil superior, esto es debido a que el método nos da unos scores que cuanto mas elevado es el valor, más se considera outlier, el valor por defecto es 0.6, al tomar este cuantil superior hemos tomado un valor de 0.61, ajustandolo a nuestra muestra.
+
+#### 1.2 Análisis de relaciones entre variables
+
+Vamos a realizar un estudio de las variables con distintos tipos de gráfico que nos pueden ayudar a entender mejor como se distribuyen las variables e interactuan entre sí. Por último, compararemos las variables vs Diagnosis que es nuestra variable target.
+
+
+##### Variables numéricas vs numéricas
+
+Este tipo de gráficos nos pueden ayudar a entender si existen relaciones entre las variables y por ejemplo, imputar valores faltantes mediante métodos sencillos, sin tener que recurrir a la media/mediana o otros métodos más complejos.
+
+Vamos a identificar las variables mas relacionadas entre si y solo mostraremos los gráficos para estas variables, ya que haciendo gráficos dos a dos, nos encontramos con mas de 90 combinaciones. Utilizaremos la correlacion y el MIC, ya que nos ayuda a identificar relaciones lineales y no lineales respectivamente. 
+
+
+
+```{r }
+# Calcular la matriz de correlaciones
+cor_matrix <- cor(df[ , variables_numeric, drop = FALSE], use = "pairwise.complete.obs")
+cor_df <- as.data.frame(as.table(cor_matrix))
+colnames(cor_df) <- c("Var1", "Var2", "Correlation")
+cor_filtered <- cor_df %>%
+  filter(Var1 != Var2) %>%
+  arrange(desc(abs(Correlation)))
+head(cor_filtered, 10)
+```
+
+En la tabla vemos como la correlación mas alta es del orden de ±0.04, lo que quiere decir que no existen relaciones lineales entre variables, comprobemos las relacción no lineales. El MIC nos informa si exiten relaciones no lineales si el valor es mayor a 0.4
+
+
+```{r }
+# Calcular la matriz MIC (detecta relaciones no lineales)
+mic_matrix <- mine(df[ , variables_numeric, drop = FALSE],use = "pairwise.complete.obs")$MIC
+mic_df <- as.data.frame(as.table(mic_matrix))
+colnames(mic_df) <- c("Var1", "Var2", "MIC")
+mic_filtered <- mic_df %>%
+  filter(Var1 != Var2) %>%
+  arrange(desc(MIC))
+
+head(mic_filtered, 10)
+```
+
+
+Vemos como no existen aparentemente relacciones entre las variables numéricas.
+
+##### Variables categoricas vs numéricas
+
+Veamos si existen relaciones entre variables categoricas y numéricas. Para filtrar las variables vamos a utilizar el test de Kruskal-Wallis ya que como vimos anteriormente, las variables numéricas no siguen una distribución normal.
+Si el test Kruskal-Wallis es positivo (es decir, p-value < 0.05), significa que al menos un grupo tiene una distribución significativamente diferente de los demás, es decir, la variable categórica afecta la distribución de la variable numerica, esto nos indica que la variable numerica podría ser un buen predictor de la variable categórica.
+
+
+```{r }
+anova_results <- list()
+
+for (var_num in variables_numeric) {
+  for (var_cat in variables_factor) {
+    # Crear un subconjunto sin NAs
+    df_subset <- df %>% select(all_of(c(var_num, var_cat))) %>% na.omit()
+    
+    test_result <- kruskal.test(df_subset[[var_num]] ~ df_subset[[var_cat]])
+    p_value <- test_result$p.value
+    test_type <- "Kruskal-Wallis"
+
+    anova_results[[paste(var_num, var_cat, sep = "_")]] <- data.frame(
+      Variable_Numerica = var_num,
+      Variable_Categorica = var_cat,
+      P_Value = p_value,
+      Test_Usado = test_type
+    )
+  }
+}
+
+anova_results_df <- bind_rows(anova_results)
+anova_significativos <- anova_results_df %>%
+  filter(P_Value < 0.05) %>%
+  arrange(Variable_Categorica) %>%
+  select(Variable_Categorica, Variable_Numerica, P_Value)
+
+print(anova_significativos)
+```
+
+Vemos como hay varias hay varias variables numericas que son afectadas por la misma categoríca, si queremos imputar una de estas variables categóricas podríamos valorar utilizar una de las variables numericas de la lista. De cualquier forma, que el test haya sido positivo no significa que tenga un buen poder predictor sobre la variable.
+
+```{r }
+plots_numerico_categorico <- list()
+
+for (i in 1:13) {
+  var_num <- anova_significativos$Variable_Numerica[i]
+  var_cat <- anova_significativos$Variable_Categorica[i]
+  
+  p <- ggplot(df %>% select(all_of(c(var_num, var_cat))) %>% na.omit(), 
+              aes(x = .data[[var_cat]], y = .data[[var_num]], fill = .data[[var_cat]])) +
+    geom_boxplot(alpha = 0.6) +  
+    labs(title = paste0(var_cat," vs ",var_num),x = var_cat, y = var_num) +
+    theme_minimal() +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 6),  
+      axis.text.y = element_text(size = 6),  
+      axis.title.x = element_text(size = 6),  
+      axis.title.y = element_text(size = 6),  
+      plot.title = element_text(size = 10),  
+      legend.text = element_text(size = 6), 
+      legend.title = element_text(size = 8),  
+      legend.key.size = unit(0.5,"cm"),
+      plot.margin = margin(3, 3, 3, 3))  
+  
+  plots_numerico_categorico[[paste(var_num, var_cat, sep = "_")]] <- p
+}
+
+# Mostrar los gráficos en una cuadrícula
+grid.arrange(grobs = plots_numerico_categorico, ncol = 3, nrow = 5)
+
+```
+
+##### Variables categóricas vs categóricas
+
+Vamos a realizar un test de chi-cuadrado para ver si las variables estan asociadas dos a dos, una vez que hayamos detectado cuales estan asociadas, mostraremos la tabla de contingencia y el gráfico de barras asociado. El test chi-cuadrado nos dice que si el valor del p-valor es menor a 0.05, entonces las variables estan asociadas. Para ver si las categorías estan fuertemente relacionadas entonces podemos utilizar la V de cramer, un estadístico que nos dice que si el valor es entre 0.2 y 0.4 la relación que existe es moderada y mayor a 0.4 es fuerte. 
+
+Esto nos puede ayudar a elegir las variables a la hora de crear un modelo, ya que dos variables fuertemente relacionadas con utilizar una de ellas sería suficiente.
+
+
+```{r }
+# Obtener todas las combinaciones posibles de variables categóricas
+comb_categoricas <- combn(variables_factor, 2, simplify = FALSE)
+chi_results <- list()
+for (comb in comb_categoricas) {
+  var1 <- comb[1]
+  var2 <- comb[2]
+  tabla <- table(df[[var1]], df[[var2]])
+  chi_test <- chisq.test(tabla)
+  cramer_v <- CramerV(tabla)
+
+  chi_results[[paste(var1, var2, sep = "_")]] <- data.frame(
+    Variable1 = var1,
+    Variable2 = var2,
+    P_Value = chi_test$p.value,
+    Chi_Squared = chi_test$statistic,
+    Cramer_V = cramer_v
+  )
+}
+
+chi_results_df <- bind_rows(chi_results)
+chi_significativos <- chi_results_df %>%
+  filter(P_Value < 0.05) %>%
+  arrange(Variable1,P_Value)  
+
+print(head(chi_significativos, 10))
+```
+
+En este caso vemos en la tabla como si existe relaciones dos a dos entre variables, ya que el p-valor es inferior a 0.05. Sin embargo, el estadístico V-Cramer nos dice que ninguna de las variables tiene una relación moderada o fuerte.
+
+```{r }
+plots_categoricos <- list()
+top_categoricas <- head(chi_significativos, 7)
+
+for (i in 1:nrow(top_categoricas)) {
+  var1 <- top_categoricas$Variable1[i]
+  var2 <- top_categoricas$Variable2[i]
+  
+  p <- ggplot(df, aes(x = .data[[var1]], fill = .data[[var2]])) +
+    geom_bar(position = "fill") +
+    labs(title = paste("Relación entre", var1, "y", var2),
+         x = var1, y = "Proporción") +
+    scale_y_continuous(labels = scales::percent_format(scale = 1)) +
+    theme_minimal() +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 6),  
+      axis.text.y = element_text(size = 6),  
+      axis.title.x = element_text(size = 6),  
+      axis.title.y = element_text(size = 6),  
+      plot.title = element_text(size = 10),  
+      legend.text = element_text(size = 6), 
+      legend.title = element_text(size = 8),  
+      legend.key.size = unit(0.5,"cm"),
+      plot.margin = margin(3, 3, 3, 3))  
+  
+  plots_categoricos[[paste(var1, var2, sep = "_")]] <- p
+}
+
+grid.arrange(grobs = plots_categoricos, ncol = 2, nrow = 4)
+```
+
+##### Variables vs Diagnosis
+
+Comprobemos ahora todas las variables vs Diagnosis, para ver si alguna de ellas tiene una relación fuerte con la variable objetivo. Para las variables numéricas utilizaremos el test de Kruskal-Wallis y para las variables categóricas el test de chi-cuadrado. En caso de que el test sea positivo, mostraremos un gráfico para ver la relación entre las variables.
+
+```{r }
+num_results <- list()
+
+for (var_num in variables_numeric) {
+  
+  df_subset <- df %>% select(all_of(c(var_num, "Diagnosis"))) %>% na.omit()
+
+  test_result <- kruskal.test(df_subset[[var_num]] ~ df_subset[["Diagnosis"]])
+  p_value <- test_result$p.value
+
+  num_results[[var_num]] <- data.frame(
+    Variable = var_num,
+    P_Value = p_value
+  )
+}
+
+# Lista para almacenar los resultados
+cat_results <- list()
+
+for (var_cat in variables_factor) {
+  
+  tabla <- table(df[[var_cat]], df[["Diagnosis"]])
+  chi_test <- chisq.test(tabla)
+  cramer_v <- CramerV(tabla)
+
+  cat_results[[var_cat]] <- data.frame(
+    Variable = var_cat,
+    P_Value = chi_test$p.value,
+    Cramer_V = cramer_v
+  )
+}
+
+results_df <- bind_rows(bind_rows(num_results) %>% mutate(Type = "Numerica"),
+                        bind_rows(cat_results) %>% mutate(Type = "Categorica")) %>%
+                filter(P_Value < 0.05) %>%
+                arrange(Type,P_Value) %>%
+                select(3,1,2,4)
+
+results_df
+```
+
+Vemos como la variable Tremor con Diagnosis si parece tener una relación moderada, ya que el estadístico V-Cramer tiene un valor mayor a 0.2.
+
+```{r }
+
+plots_diagnosis <- list()  # Lista para almacenar los gráficos
+
+# Bucle sobre cada variable filtrada
+for (i in 1:nrow(results_df)) {
+  
+  var_name <- results_df$Variable[i]  
+  var_type <- results_df$Type[i]  
+  
+  if (var_type == "Numerica") {
+    # Si es numérica, hacer un boxplot
+    p <- ggplot(df, aes(x = Diagnosis, y = .data[[var_name]], fill = Diagnosis)) +
+      geom_boxplot(alpha = 0.6) +
+      labs(title = paste(var_name, "vs Diagnosis"),
+           x = "Diagnosis", y = var_name) +
+      theme_minimal() +
+      theme(
+        axis.text.x = element_text(angle = 45, hjust = 1, size = 6),  
+        axis.text.y = element_text(size = 6),  
+        axis.title.x = element_text(size = 6),  
+        axis.title.y = element_text(size = 6),  
+        plot.title = element_text(size = 10),  
+        legend.text = element_text(size = 6), 
+        legend.title = element_text(size = 8),  
+        legend.key.size = unit(0.5,"cm"),
+        plot.margin = margin(3, 3, 3, 3))  
+    
+  } else if (var_type == "Categorica") {
+    # Si es categórica, hacer un gráfico de barras apiladas
+    p <- ggplot(df, aes(x = .data[[var_name]], fill = Diagnosis)) +
+      geom_bar(position = "fill") +
+      labs(title = paste(var_name, "vs Diagnosis"),
+           x = var_name, y = "Proporción") +
+      scale_y_continuous(labels = scales::percent_format(scale = 1)) +
+      theme_minimal() +
+      theme(
+        axis.text.x = element_text(angle = 45, hjust = 1, size = 6),  
+        axis.text.y = element_text(size = 6),  
+        axis.title.x = element_text(size = 6),  
+        axis.title.y = element_text(size = 6),  
+        plot.title = element_text(size = 10),  
+        legend.text = element_text(size = 6), 
+        legend.title = element_text(size = 8),  
+        legend.key.size = unit(0.5,"cm"),
+        plot.margin = margin(3, 3, 3, 3))  
+  }
+  
+  # Guardar el gráfico en la lista
+  plots_diagnosis[[var_name]] <- p
+}
+
+grid.arrange(grobs = plots_diagnosis[1:length(plots_diagnosis)], ncol = 3)
+```
+
+
+Con los gráficos parece sobre todo las variablesTRemor, Functional Assasment y MoCA tienen mayor capacidad predictiva.
+
+### 2. Análisis de datos faltantes
+Vamos a dividir este primer apartado en varios puntos:
+- Detección
+- Métodos de imputación
+
+#### Detección
+
+Podemos utilizar muchas formas de mostrar los valores faltantes. Vamos a comprobar si existen valores faltantes y si hay observaciones que tienen mas de un valor faltante en el registro.
+
+
+```{r }
+# Calcular valores faltantes por columna
+missing_values <- df %>%
+  summarise(across(everything(), ~ sum(is.na(.)))) %>%
+  pivot_longer(cols = everything(), names_to = "Variable", values_to = "Num_Faltantes") %>%
+  mutate(Percentage = (Num_Faltantes / nrow(df)) * 100) %>%
+  filter(Num_Faltantes > 0) %>%
+  arrange(desc(Percentage)) 
+
+print(missing_values)
+```
+
+Vemos como hay varias variables con valores faltantes, la variable Diabetes es la que tiene un mayor porcentaje de valores faltantes, seguida de la variable SpeechProblems. Vamos a ver cuantas observaciones tienen mas de un valor faltante.
+
+```{r }
+df_missing <- df %>%
+mutate(Num_Faltantes = rowSums(is.na(.))) %>%
+filter(Num_Faltantes >= 2) %>%
+select(PatientID) %>%
+pull() %>%
+length() %>%
+print()
+```
+Son 354 registros que tienen más de un valor faltante, eso supone un 16% de la muestra, por lo que no podemos eliminarlos directamente, ya que perderíamos una cantidad significativa de datos. Podemos ver en la siguiente tabla como la librería mice nos ayuda a seleccionar el método de imputación más adecuado. La logica que sigue es la siguiente:
+  - Si una variable es continua sugiere imputar por predictive mean matching.
+  - Si la variable es categorica binaria, sugiere imputar por regresión logistica.
+  - Si la variable es categorica con más de dos categorias, sugiere imputar a regresión logistica múltiple.
+  - Si la variable es categorica y ordenada, entonces sugiere imputar por regresión polinómica.
+  - Por último, si la variable tiene muchos valores faltantes, sugiere imputar mediante arboles de decisión.
+
+```{r }
+init <- mice(df, maxit = 0)  
+print(init$method)  
+```
+
+Vamos a ver una a una que podemos hacer:
+  - Diabetes: tiene una cantidad muy elevada de datos faltantes con un 11.4%, este valor es muy elevado, pero debido a que parece tener una fuerte relacción con la variable objetivo deberíamos intentar imputarla, pero la unica variable significativa para predecir diabetes parece que es categorica tambien, por lo que vamos a imputar aleatoriamente respetando la distribución original.
+  - Gender, Hypertension y SpeechProblems: Vamos a imputarla mediante regresión logistica como nos sugiere mice, de cualquier forma, tiene sentido ya que son variables categoricas.
+  - El resto de variables con valores faltantes utilizaremos una imputación por predictive mean matching, ya que es un método que se ajusta a la distribución de los datos.
+
+```{r }
+seed <- 17
+set.seed(seed) 
+
+# Imputar SOLO en grupos con suficientes datos válidos y donde haya valores para muestrear
+df_imp_aux <- df %>%
+  group_by(Ethnicity) %>%
+  mutate(Diabetes = as.integer(as.character(Diabetes)),
+    Diabetes = ifelse(is.na(Diabetes), 
+                               base::sample(na.omit(Diabetes), 1, replace = TRUE), 
+                               Diabetes),
+    Diabetes = as.factor(Diabetes)) %>%
+  ungroup()
+
+init <- mice(df_imp_aux, seed = seed, print = FALSE)
+df_imp <- complete(init)
+
+df_imp %>%
+  summarise(across(everything(), ~ sum(is.na(.)))) %>%
+  pivot_longer(cols = everything(), names_to = "Variable", values_to = "Num_Faltantes") %>%
+  mutate(Percentage = (Num_Faltantes / nrow(df)) * 100) %>%
+  filter(Num_Faltantes > 0) %>%
+  arrange(desc(Percentage)) %>%
+  print()
+```
+Vemos como despues de aplicar mice al conjunto de datos, ya no tenemos valores faltantes. Vamos a guardar este conjunto de datos para poder seguir con el análisis. Vamos a graficar las variables para ver como se han imputado los datos.
+
+```{r }
+
+plots_imputacion <- list()  # Lista para almacenar los gráficos
+
+# Bucle sobre cada variable filtrada
+for (i in 1:nrow(missing_values)) {
+  
+  var_name <- missing_values[i,1] %>% pull()
+  var_type <- df[1,var_name] %>% map(class) %>% .[1] %>% unlist()  
+  
+  if (var_type == "numeric") {
+    # Si es numérica, hacer un boxplot
+    p <- ggplot(df_imp, aes(x = Diagnosis, y = .data[[var_name]], fill = Diagnosis)) +
+      geom_boxplot(alpha = 0.6) +
+      labs(title = paste(var_name, "vs Diagnosis"),
+           x = "Diagnosis", y = var_name) +
+      theme_minimal() +
+      theme(
+        axis.text.x = element_text(angle = 45, hjust = 1, size = 6),  
+        axis.text.y = element_text(size = 6),  
+        axis.title.x = element_text(size = 6),  
+        axis.title.y = element_text(size = 6),  
+        plot.title = element_text(size = 10),  
+        legend.text = element_text(size = 6), 
+        legend.title = element_text(size = 8),  
+        legend.key.size = unit(0.5,"cm"),
+        plot.margin = margin(3, 3, 3, 3))  
+    
+  } else if (var_type == "factor") {
+    # Si es categórica, hacer un gráfico de barras apiladas
+    p <- ggplot(df_imp , aes(x = .data[[var_name]], fill = Diagnosis)) +
+      geom_bar(position = "fill") +
+      labs(title = paste(var_name, "vs Diagnosis"),
+           x = var_name, y = "Proporción") +
+      scale_y_continuous(labels = scales::percent_format(scale = 1)) +
+      theme_minimal() +
+      theme(
+        axis.text.x = element_text(angle = 45, hjust = 1, size = 6),  
+        axis.text.y = element_text(size = 6),  
+        axis.title.x = element_text(size = 6),  
+        axis.title.y = element_text(size = 6),  
+        plot.title = element_text(size = 10),  
+        legend.text = element_text(size = 6), 
+        legend.title = element_text(size = 8),  
+        legend.key.size = unit(0.5,"cm"),
+        plot.margin = margin(3, 3, 3, 3))  
+  }
+  
+  # Guardar el gráfico en la lista
+  plots_imputacion[[var_name]] <- p
+}
+
+grid.arrange(grobs = plots_imputacion[1:length(plots_imputacion)], ncol = 3)
+```
+
+Vamos a repetir el proceso con el dataset una vez hemos imputado los datos, para ver si los valores atípicos han cambiado el restultado que obtuvimos anteriormente.
+
+```{r }
+num_results_imp <- list()
+
+for (var_num in variables_numeric) {
+  
+  df_subset <- df_imp %>% select(all_of(c(var_num, "Diagnosis")))
+
+  test_result <- kruskal.test(df_subset[[var_num]] ~ df_subset[["Diagnosis"]])
+  p_value <- test_result$p.value
+
+  num_results_imp[[var_num]] <- data.frame(
+    Variable = var_num,
+    P_Value = p_value
+  )
+}
+
+# Lista para almacenar los resultados
+cat_results_imp <- list()
+
+for (var_cat in variables_factor) {
+  
+  tabla <- table(df_imp[[var_cat]], df[["Diagnosis"]])
+  chi_test <- chisq.test(tabla)
+  cramer_v <- CramerV(tabla)
+
+  cat_results_imp[[var_cat]] <- data.frame(
+    Variable = var_cat,
+    P_Value = chi_test$p.value,
+    Cramer_V = cramer_v
+  )
+}
+
+results_df_imp <- bind_rows(bind_rows(num_results_imp) %>% mutate(Type = "Numerica"),
+                        bind_rows(cat_results_imp) %>% mutate(Type = "Categorica")) %>%
+                filter(P_Value < 0.05) %>%
+                arrange(Type,P_Value) %>%
+                select(3,1,2,4)
+
+results_df_imp %>% full_join(results_df, by = c("Variable","Type"), suffix = c("_imp","_orig")) %>% select(-Type)
+```
+
+En la tabla apreciamos como las variables siguen siendo las mismas y que aun habiendo cambiado los p-valores y la V-Cramer siguen siendo significativos, por lo que podemos decir que los valores atípicos no han afectado a la relación entre las variables.
+
+### 3. Equilibrado de la variable Diagnosis
+
+Por último vamos a realizar un equilibrado de la variable Diagnosis.
+
+Vamos a dividir este primer apartado en varios puntos:
+- Evaluar el desbalanceo
+- Métodos de equilibrio de la muestra
+
+#### Evaluar el desbalanceo
+
+Ya vimos que la variable Diagnosis está desbalanceada, aproximadamente un 62% de la muestra tiene como valor 1 para Diagnosis, por lo que debemos reducir la muestra e igualarla.
+```{r }}
+df_imp %>%
+  group_by(Diagnosis) %>%
+  summarise(Count = n()) %>%
+  mutate(Percentage = round((Count / sum(Count)) * 100,2) )
+```
+
+
+#### Método de equilibrio de la muestra
+
+Usamos el muestreo del cubo para equilibrar la muestra reduciendo la clase mayoritaria. Así, obtenemos una muestra de 800 regristos con Diagnosis 1.
+
+```{r }
+df_yes <- df_imp %>% filter(Diagnosis == 1)
+yes_rows <- nrow(df_yes)
+
+# Creamos las variables indicadores para cada una de las variables de equilibrio. 
+
+# Variable que vale 1 en todas las partes (para comprobar la estimación del tamaño poblacional)
+UNO = rep(1, yes_rows) 
+
+# Variables cuantitativas
+X1 <- df_yes[ , variables_numeric]
+
+# Variables cualitativas - creación de las variables indicadoras
+
+X2 <- disjunctive(df_yes$Gender)
+colnames(X2) <- levels(df_yes$Gender)
+
+X3 <- disjunctive(df_yes$Ethnicity)
+colnames(X3) <- levels(df_yes$Ethnicity)
+
+X4 <- disjunctive(df_yes$EducationLevel)
+colnames(X4) <- levels(df_yes$EducationLevel)
+
+X5 <- disjunctive(df_yes$Smoking)
+colnames(X5) <- levels(df_yes$Smoking)
+
+X6 <- disjunctive(df_yes$FamilyHistoryParkinsons)
+colnames(X6) <- levels(df_yes$FamilyHistoryParkinsons)
+
+X7 <- disjunctive(df_yes$TraumaticBrainInjury)
+colnames(X7) <- levels(df_yes$TraumaticBrainInjury)
+
+X8 <- disjunctive(df_yes$Hypertension)
+colnames(X8) <- levels(df_yes$Hypertension)
+
+X9 <- disjunctive(df_yes$Diabetes)
+colnames(X9) <- levels(df_yes$Diabetes)
+
+X10 <- disjunctive(df_yes$Depression)
+colnames(X10) <- levels(df_yes$Depression)
+
+X11 <- disjunctive(df_yes$Stroke)
+colnames(X11) <- levels(df_yes$Stroke)
+
+X12 <- disjunctive(df_yes$Tremor)
+colnames(X12) <- levels(df_yes$Tremor)
+
+X13 <- disjunctive(df_yes$Rigidity)
+colnames(X13) <- levels(df_yes$Rigidity)
+
+X14 <- disjunctive(df_yes$Bradykinesia)
+colnames(X14) <- levels(df_yes$Bradykinesia)
+
+X15 <- disjunctive(df_yes$PosturalInstability)
+colnames(X15) <- levels(df_yes$PosturalInstability)
+
+X16 <- disjunctive(df_yes$SpeechProblems)
+colnames(X16) <- levels(df_yes$SpeechProblems)
+
+X17 <- disjunctive(df_yes$SleepDisorders)
+colnames(X17) <- levels(df_yes$SleepDisorders)
+
+
+# Matriz de diseño
+X <- as.matrix( cbind( UNO, X1, X2, X3, X4, X5, X6, X8, X9, X10, X11, X12, X13, X14, X15, X16, X17 ) )
+
+# Tamaño de la muestra
+sample_yes_df <- 800
+
+# Probabilidades de inclusión
+pik = rep( sample_yes_df / yes_rows, yes_rows )
+
+# extracción de la muestra
+set.seed(seed)
+s = samplecube(X, pik, method = 2, order = 1, comment = FALSE)
+
+# Generación de fichero resultante
+sample_yes_df_final = cbind( df_yes, s )
+sample_yes_df_final <- sample_yes_df_final[ sample_yes_df_final$s == 1, ]
+sample_yes_df_final$s  <- NULL
+
+```
+Veamos la calidad de la muestra obtenida:
+
+```{r }
+# Calidad de la muestra
+Totales <- apply(X, 2, sum)
+Horvitz.Thompson <- apply(X * s / pik, 2, sum)
+calidad <- cbind.data.frame(Totales, Horvitz.Thompson)
+calidad$Desv.Abs. <- round(calidad$Totales - calidad$Horvitz.Thompson, 2)
+calidad$Desv.Rel. <- round((calidad$Totales / calidad$Horvitz.Thompson - 1) *100, 2)
+
+formattable(calidad)
+```
+
+
+
+Finalmente, se une la muestra de target = 1 con target = 0:
+
+```{r }
+
+sample_no_df_final <- df_imp %>% filter(Diagnosis == 0)
+df_final <- bind_rows(sample_yes_df_final, sample_no_df_final)
+
+
+formattable(df_final %>% group_by(Diagnosis) %>% count())
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
