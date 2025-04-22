@@ -1,0 +1,437 @@
+---
+title: "Modulo 2"
+author: "Manuel Berea Arellano"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+# Cargamos las librerías
+library(data.table)
+library(tidytable)
+library(ggplot2)
+library(gridExtra)
+library(car)
+library(mice)
+library(inspectdf)
+library(lubridate)
+
+# Definimos las variables que vamos a utilizar.
+path <- strsplit(getwd(),"/")[[1]]
+path <- paste0(path[1:(length(path)-1)],collapse = "/")
+seed <- 17
+```
+
+# Introducción
+
+En este módulo vamos a trabajar con un conjunto de datos que contiene información sobre bombas de agua en Tanzania. Lo primero que vamos a hacer es cargar los datos.
+
+```{r}
+# Cargamos los datos
+df <- fread(paste0(path,"/Bombas_training.csv"))
+head(df)
+# Veamos el tipo de datos que tenemos
+str(df)
+```
+Vemos a primera vista que tenemos un conjunto de 40 variables y 59400 observaciones. Las variables son de todo tipo, numéricas, categóricas, fechas, etc. 
+
+Primero vamos a ajustar los tipos de variables, ya que tenemos variables logicas que deberian ser categóricas dicotomicas numericas, las variables caracter las vamos a transformar en factor, y las variables numéricas las vamos a dejar como están, excepto las variables `construction_year` y `num_private` que aparecen como numerica pero son categorica también.
+```{r }
+# Vamos a realizar el cambio de caracter
+character_vars <- names(df)[sapply(df, is.character)]
+
+df[, (character_vars) := lapply(.SD, factor), .SDcols = character_vars]
+df[, construction_year := as.factor(construction_year)]
+df[, num_private := as.factor(num_private)]
+
+# Vamos a realizar el cambio de numerico
+df[, public_meeting := as.integer(public_meeting)]
+df[, permit := as.integer(permit)]
+
+str(df)
+```
+
+Ahora al tener las variables en factor, podemos ver el numero de categorías que tenemos, en algunos casos demasiado elevado. También podemos apreciar que hay categorias que son vacías o no tienen sentido, como el año $0$ en `construction_year`.
+
+```{r}
+df$construction_year[df$construction_year== 0] <- NaN
+df$scheme_management[df$scheme_management ==''] <- NaN
+df$scheme_name[df$scheme_name ==''] <- NaN
+
+summary(df[,-1]) # Excluimos la variable id del summary.
+```
+A primera vista podemos ver que hay variables con outliers, como la variable `amount_tsh` que tiene un valor máximo de $350000$ muy lejano del tercer cuartil. De este primer vistazo nos podemos preguntar varias cosas:
+  - ¿Tenemos muchos valores faltantes?
+  - ¿Cómo se distribuyen las variables numéricas?
+  - ¿Cómo se distribuyen las variables categóricas?
+  - ¿Hay variables que no aportan información?
+  - ¿Hay variables que se puedan agrupar?
+  - ¿Hay valores atpicos?
+  - ¿Podemos crear variables nuevas?
+  
+En resumen, multitud de preguntas que nos podemos hacer y que nos pueden llevar a realizar un análisis exploratorio de los datos. Vamos a realizar en los proximos puntos un análisis de las distribuciones de las variables. En estos análisis vamos a ver si existen valores faltantes y atípicos, si podemos crear nuevas variables y si podemos agrupar variables. También, podemos ver si alguna variable es mejor eliminarla por no aportar información o simplemente por falta de informacion, demasiados grupos en las categorías, etc.
+
+```{r}
+data.table(
+  variable = names(df),
+  na_count = sapply(df, function(x) sum(is.na(x))),
+  na_percent = sapply(df, function(x) mean(is.na(x)) * 100)
+) %>% 
+  filter(na_percent>0)%>%
+  arrange(-na_percent)
+```
+Vemos que hay $5$ variables que contienen valores ausentes, todas las variables tienen un porcentaje elevado de valores ausenten, más del $5\%$$ de valores ausentes, al tratarse de variables categóricas, podemos crear una categoría especial que se llame nulo, ya que la no presencia de valores podría tener potencial predictivo. En el caso de `public_meeting` y `permit` son variables dicotomicas, por lo que vamos a imputar los nulos.
+
+```{r message=FALSE, warning=FALSE}
+df[is.na(construction_year), construction_year := "blank"]
+df[is.na(scheme_management), scheme_management := "blank"]
+df[is.na(scheme_name), scheme_name := "blank"]
+
+vars_to_impute <- c("public_meeting", "permit")
+imp <- mice(df[, ..vars_to_impute])
+imputed_vars <- complete(imp)
+df[, (vars_to_impute) := imputed_vars[, vars_to_impute]]
+```
+  
+
+# Análisis de las variables numéricas
+
+Vamos a sacar los estadísticos básicos de las variables numéricas, que son dos, `amount_tsh` y `population`. Vamos a ver si hay valores faltantes y si hay valores atípicos.
+El resto de variables son no tienen distribución como tal, ya que son variables dicotomicas, codigos de lugares, coordenadas de GPS, etc.
+```{r}
+numeric_cols <- c("amount_tsh","population")
+df_numeric <- df[, ..numeric_cols]
+
+# Vamos a sacar los estadisticos básicos de las variables numéricas
+df_numeric %>%
+  summary()
+
+```
+Vamos claramente que tiene valores atipicos, ya que el máximo es muy lejano al tercer cuartil. Vamos a ver la distribución de estas variables, veremos cuantas observaciones tenemos con estos valores atípicos y valoraremos excluirlas del análisis, ya que al no tener mas información no podemos saber si son errores de medición o simplemente valores atípicos.
+
+```{r message=FALSE, warning=FALSE}
+histograms <- list()
+
+for (variable in numeric_cols) {
+  p <- ggplot(df_numeric, aes(x = .data[[variable]])) +
+         geom_boxplot() +
+         ggtitle(paste("Distribution of", variable))
+  histograms[[variable]] <- p
+}
+
+for (variable in numeric_cols) {
+  p <- ggplot(df_numeric, aes(x = log(.data[[variable]]))) +
+         geom_boxplot() +
+         ggtitle(paste("Distribution log of ", variable))
+  variable <- paste0("log ", variable)
+  histograms[[variable]] <- p
+}
+
+grid.arrange(grobs = histograms)
+```
+
+Tenemos en la fila superior la variable como tal y en la parte inferior la distribución aplicando el logaritmo a la variable, ya que al ser valores tan elevados, la distribución no se aprecia bien. Vemos como ambas variables tienen valores atípicos, vamos a identificarlos y a ver cuantas observaciones tenemos con estos valores.
+
+```{r}
+# Vamos a ver cuantas observaciones tenemos con valores atípicos en amount_tsh
+q1_amount <- quantile(df$amount_tsh, 0.25, na.rm = TRUE)
+q3_amount <- quantile(df$amount_tsh, 0.75, na.rm = TRUE)
+iqr_amount <- q3_amount - q1_amount
+
+lower_bound_amount <- q1_amount - 1.5 * iqr_amount
+upper_bound_amount <- q3_amount + 1.5 * iqr_amount
+
+outliers_amount <- df[amount_tsh < lower_bound_amount | amount_tsh > upper_bound_amount]
+
+cat("Numero de valores atípicos en amount_tsh:", nrow(outliers_amount), "\n")
+cat("Supone un :", round(nrow(outliers_amount)/nrow(df)*100,2), "% \n")
+```
+
+```{r}
+# Vamos a ver cuantas observaciones tenemos con valores atípicos en population
+q1_population <- quantile(df$population, 0.25, na.rm = TRUE)
+q3_population <- quantile(df$population, 0.75, na.rm = TRUE)
+iqr_population <- q3_population - q1_population
+
+lower_bound_population <- q1_population - 1.5 * iqr_population
+upper_bound_population <- q3_population + 1.5 * iqr_population
+
+outliers_population <- df[population < lower_bound_population | population > upper_bound_population]
+
+cat("Numero de valores atípicos en population:", nrow(outliers_population), "\n")
+cat("Supone un :", round(nrow(outliers_population)/nrow(df)*100,2), "% \n")
+```
+```{r}
+cat("Numero de ids con outlier en ambas variables:", outliers_population$id %>% intersect(outliers_amount$id) %>% length(), "\n")
+cat("Supone un :", round(outliers_population$id %>% intersect(outliers_amount$id) %>% length()*100 / nrow(df),2), "% \n")
+
+df[id %in% intersect(outliers_population$id, outliers_amount$id)]
+  
+```
+Tenemos un $18.8\%$ y un $7.4\%$ de valores atípicos en `amount_tsh` y `population` respectivamente, de los cuales un $2.1\%$ de las observaciones tienen valores atípicos en ambas variables. Si tuviesemos una variable predictora, podríamos analizar la relaccion que existe con esta variable, así determinar si hay que realizar alguna transformación.
+
+En cuanto a las variables GPS, podríamos realizar una transformación, de esta forma podemos guardar la información de las coordenadas en una sola variable, tomaremos las tres variables de GPS, altutid, longitud y latitud y las vamos a transformar en una única variable $lat\_long\_alt = \sqrt{latitude^2 + longitude^2 + height^2}$ y después le aplicartemos una normalización para acotar los valores, esto implica restar la media y dividir entre la desviación típica.
+
+```{r}
+df$lat_long_alt <- sqrt(df$latitude^2 + df$longitude^2 + df$gps_height ^2)
+df$lat_long_alt <- scale(df$lat_long_alt)
+```
+
+
+# Análisis de las variables categóricas
+
+```{r}
+x <- inspect_cat(df)
+show_plot(x)
+rm(x)
+```
+
+Vemos como muchas de las variables tienen demasiadas categorías, vamos comprobar si podemos hacer agrupaciones de las variables, para que las categorías sean representativas. Habrá variables que no podremos agrupar y debido a la granularidad deberíamos excluirlas de nuestro modelo.
+
+Vamos a poner el foco en `source` y `source_type`, que parecen iguales pero en realidad tiene alguna cosa distinta. Lo que vamos a buscar son las que son distintas con un conteo de las filas que tienen distinta observacion, vemos que son $27930$ filas y las llamaremos "OTHER" para distinguirlas y así podemos eliminar una de estas variables. Para este proceso, vamos a buscar las que son exactamente iguales y las que empiezan igual, entonces las guardaremos en una variables auxiliar, las que no cumplan este criterio, las llamaremos "OTHER" y después eliminaremos las variable sorce_type. Este proceso, lo vamos a realizar en más variables.
+
+```{r}
+df[, source := as.character(source)]
+df[, source_type := as.character(source_type)]
+
+df[, source_AUX := (source == source_type) | 
+                    substring(source, 1, 5) == substring(source_type, 1, 5)]
+
+df[source_AUX == FALSE, source := "OTHER"]
+df[, c("source_AUX", "source_type") := NULL]
+
+df[, source := as.factor(source)]
+```
+
+
+Haremos de forma similar con las variables `extraction_type`, `extraction_type_group`, `waterpoint_type` y `waterpoint_type_group`
+
+```{r}
+# ---- extraction_type ----
+df[, extraction_type := as.character(extraction_type)]
+df[, extraction_type_group := as.character(extraction_type_group)]
+
+df[, extraction_type_aux := (extraction_type == extraction_type_group) | 
+                             substring(extraction_type, 1, 5) == substring(extraction_type_group, 1, 5)]
+
+df[extraction_type_aux == FALSE, extraction_type := "OTHER"]
+
+df[, c("extraction_type_aux", "extraction_type_group") := NULL]
+df[, extraction_type := as.factor(extraction_type)]
+
+# ---- waterpoint_type ----
+df[, waterpoint_type := as.character(waterpoint_type)]
+df[, waterpoint_type_group := as.character(waterpoint_type_group)]
+
+df[, waterpoint_type_aux := (waterpoint_type == waterpoint_type_group) | 
+                             substring(waterpoint_type, 1, 5) == substring(waterpoint_type_group, 1, 5)]
+
+df[waterpoint_type_aux == FALSE, waterpoint_type := "OTHER"]
+
+df[, c("waterpoint_type_aux", "waterpoint_type_group") := NULL]
+df[, waterpoint_type := as.factor(waterpoint_type)]
+```
+
+
+Lo siguiente que vamos a realizar, que también lo haremos en otras variables, es convertir a numérico las variables categóricas con pocas categorías. Esto principalmente se hace para agilizar el tratamiento de los datos, ya que el procesado de números enteros pequeños es más rápido que el de strings.
+Por ejemplo, podemos ver la variable water_quality, como tiene $8$ catgorías, lo que nos permite hacer este proceso de manera rápida.
+
+```{r}
+levels(factor(df$water_quality))
+df[, water_quality := as.character(water_quality)]
+
+# Recode
+df[, water_quality := recode(water_quality, 
+                             "'coloured' = 1;
+                              'fluoride' = 2; 
+                              'fluoride abandoned' = 3;
+                              'milky' = 4;
+                              'salty' = 5;
+                              'salty abandoned' = 6; 
+                              'soft' = 7;
+                              'unknown' = 8")]
+
+df[, water_quality := as.numeric(water_quality)]
+```
+En el siguiente paso, realizamos procesos similares para otras variables:
+```{r}
+# ---- Recodificar waterpoint_type ----
+df[, waterpoint_type := as.character(waterpoint_type)]
+df[, waterpoint_type := recode(waterpoint_type, 
+                               "'cattle trough' = 'CT';
+                                'communal standpipe' = 'CS';
+                                'communal standpipe multiple' = 'CSM';
+                                'dam' = 'D';
+                                'hand pump' = 'HP';
+                                'improved spring' = 'IS';
+                                'other' = 'O'")]
+
+# ---- Eliminar quantity_group por ser duplicada ----
+df[, quantity_group := NULL]
+
+# ---- Recodificar quality_group ----
+df[, quality_group := as.character(quality_group)]
+df[, quality_group := recode(quality_group,
+                             "'unknown' = 0;
+                              'colored' = 1;
+                              'milky' = 2;
+                              'salty' = 3;
+                              'good' = 4;
+                              'fluoride' = 5")]
+df[, quality_group := as.numeric(quality_group)]
+
+# ---- Recodificar quantity ----
+df[, quantity := as.character(quantity)]
+df[, quantity := recode(quantity,
+                        "'dry' = 1;
+                         'insufficient' = 2;
+                         'unknown' = 3;
+                         'seasonal' = 4;
+                         'enough' = 5")]
+df[, quantity := as.numeric(quantity)]
+```
+
+Las siguientes variables que vamos a tratar son installer y funder. Parecen distintas, pero si hacemos un head/tail de los datos, vemos como tienen nombres iguales, otros están con "ruido" es decir, con espacios, etc. Vamos a hacer una tratamiento de estas dos variables y vamos a crear una variable de coincidientes. 
+
+
+```{r warning=FALSE}
+df[, `:=`(
+  installer = toupper(as.character(installer)),
+  funder = toupper(as.character(funder))
+)]
+
+df[, coincidentes := (funder == installer) |
+                      (funder == "GOVERNMENT OF TANZANIA" & installer %in% c("GOVER", "GOVERNMENT")) |
+                      substring(funder, 1, 5) == substring(installer, 1, 5)]
+
+df[, coincidentes := recode(as.character(coincidentes), "'FALSE' = 0; 'TRUE' = 1")]
+df[, coincidentes := as.numeric(coincidentes)]
+
+df[, funder := gsub(" ", "", funder)]
+df[, funder := recode(funder, "'' = 'OTHER'; '0' = 'OTHER'")]
+
+df[, installer := gsub(" ", "", installer)]
+df[, installer := recode(installer, "'' = 'OTHER'")]
+df[, installer := substr(installer, 1, 5)]
+df[, installer := gsub(" ", "OTHER", installer)]  # por si queda algún espacio residual
+```
+
+Realizamos mas procesos similares para otras variables.
+```{r warning=FALSE}
+# ---- basin ----
+df[, basin := as.character(basin)]
+df[, basin := substr(basin, 1, 5)]
+df[, basin := recode(basin, 
+                     "'Inter' = 1;
+                      'Lake ' = 2;
+                      'Panga' = 3;
+                      'Rufij' = 4;
+                      'Ruvum' = 5;
+                      'Wami ' = 6")]
+df[, basin := as.numeric(basin)]
+
+# ---- payment & payment_type ----
+df[, `:=`(
+  payment = as.character(payment),
+  payment_type = as.character(payment_type)
+)]
+
+df[, payment := recode(payment,
+                       "'pay when scheme fails' = 'on failure';
+                        'pay monthly' = 'monthly';
+                        'pay per bucket' = 'per bucket';
+                        'pay annually' = 'annually'")]
+
+# Como son iguales, eliminamos payment_type
+df[, payment_type := NULL]
+
+df[, payment := factor(payment)]
+df[, payment := recode(as.character(payment),
+                       "'on failure' = 1;
+                        'monthly' = 2;
+                        'per bucket' = 3;
+                        'annually' = 4")]
+df[, payment := as.numeric(payment)]
+
+# ---- management ----
+df[, management := as.character(management)]
+df <- unite(df, col = "management", c(27:28), sep = "-", remove = TRUE)
+
+df[, management := recode(management,
+                          "c('other-other', 'unknown-unknown', 'other - school-other') = 0;
+                           'parastatal-parastatal' = 1;
+                           'company-commercial' = 2;
+                           'private operator-commercial' = 3;
+                           'trust-commercial' = 4;
+                           'vwc-user-group' = 5;
+                           'water authority-commercial' = 6;
+                           'water board-user-group' = 7;
+                           'wua-user-group' = 8;
+                           'wug-user-group' = 9")]
+df[, management := as.numeric(management)]
+
+# ---- extraction_type ----
+df[, extraction_type := as.character(extraction_type)]
+df[, extraction_type := toupper(substr(extraction_type, 1, 5))]
+df[, extraction_type_class := NULL]  # Eliminamos columna redundante
+
+df[, extraction_type := recode(extraction_type,
+                               "'OTHER' = 0;
+                                'AFRID' = 1;
+                                'GRAVI' = 2;
+                                'INDIA' = 3;
+                                'MONO' = 4;
+                                'NIRA/' = 5;
+                                'SUBME' = 6;
+                                'SWN 8' = 7")]
+df[, extraction_type := as.numeric(extraction_type)]
+```
+
+
+Las variables categóricas con muchos nombres decidí eliminarlas, ya que podrían sesgar el modelo, algunas de ellas tienen demasiadas de categorías y otras son muy parecidas a otras de las variables.
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+cols_to_remove <- c("region", "wpt_name", "lga", "subvillage", "ward",
+                    "extraction_type", "payment", "waterpoint_type", 
+                    "recorded_by", "funder", "installer")
+
+df[, (cols_to_remove) := NULL]
+
+
+df[, source := as.character(source)]
+df[, source_class := as.character(source_class)]
+df[, scheme_management := as.character(scheme_management)]
+
+df[, date_recorded := ymd(date_recorded)]
+
+y <- inspect_cat(df)
+show_plot(y)
+```
+
+Con esto podemos dar por limpio el data set. Si tuviesemos que implementar un modelo con este conjunto de datos, antes de eliminar cualquier variable estaría muy bien comprobar si existen dependencias con la variable objetivo. De cualquier forma, hemos atacado los principales problemas que nos podemos encontrar en un data set como son, limpieza de nulos, comprobar si hay outliers, afrontar variables categoricas...
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

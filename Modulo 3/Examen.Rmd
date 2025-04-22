@@ -11,24 +11,386 @@ library(dplyr)
 library(memisc)
 library(ggplot2)
 library(knitr)
+library(skimr)
+library(car)
+library(lmtest)
+library(rstanarm)
+library(loo)
+library(glmnet)
+
+seed <- 17
 
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
 ## 1. Modelo de regresión simple
 
+### 1.1 Lectura de datos y estadísticas descriptivas
 
+- freeny.y es un vector serie temporal de datos trimestrales de ventas que van desde (1962,2Q) to (1971,4Q).
+- freeny.x es una matriz de variables explicativas. La primera columna es freeny.y retrasada un trimestre, la segunda un indice de precios (price index), la tercera el nivel de renta (income level), y un indicador del mercado potencial (market potential).
+
+
+Se pide leer la base de datos freeny, obtener un sumario de estadísticas, presentar los primeros y últimos resultados, y las matrices de varianzas y correlación.
+
+Podemos ver un resumen del dataframe con la función skim, que nos da pequeño sumario de numero de filas, columnas. El tipo de variables explicativas que tenemos, y un resumen de algunos estadisticos como la media, desviación estandar, mediana, minimo, maximo, etc.
+
+Además, para la variable y, al ser un vector temporal obtenemos algunos otra información.
 
 ```{r cars}
-summary(freeny)
+skim(freeny)
+```
+Para ver los primeros y ultimos resultados podemos utilizar la funcion head y tail.
+```{r}
+head(freeny)
 ```
 
-## Including Plots
+Cabe destacar que el primer punto la variable lag.quarter debería ser NA, pero ha sido imputada por el primer valor, por lo que quizá a la hora de crear un modelo de regresión simple, deberíamos eliminar la primera fila.
 
-You can also embed plots, for example:
-
-```{r pressure, echo=FALSE}
-plot(pressure)
+```{r}
+tail(freeny)
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+Para los ultimos registros, a primera vista no se aprecia nada extraño.
+
+Para ver las matrices de varianzas/covariancias y correlación, podemos utilizar las funciones var y cor.
+
+En la siguiente tabla encontramos, la matriz de variancias/covarianzas, en la diagonal contramos las variancias de cada variable, y en las otras celdas las covarianzas entre las variables. Una varianza baja, implica que la variabilidad es baja, es decir, que los valores de la variable no se alejan mucho de la media. Una covarianza alta, implica que las variables están relacionadas, es decir, que si una variable aumenta, la otra también lo hace. Y una covarianza negativa, signigica que cuando una variable aumenta, la otra disminuye.
+
+```{r}
+cov(freeny)
+```
+Ahora, analicemos la correlación de las variables. La correlación es un valor que va de -1 a 1, donde 1 significa que las variables están perfectamente correlacionadas positivamente, -1 perfectamente correlacionadas negativamente, y 0 no hay correlación. En la diagonal siempre encontraremos 1 y es una matriz simétrica. Podemos ver como todas las variables tienen correlación cercana a 1 o -1, lo que significa que linealmente están muy relacionadas.
+
+```{r}
+cor(freeny)
+```
+
+### 1.2 Estimar modelo que relaciones el precio de freebny con las ventas de freeny
+
+Es decir, tenemos que estimar los parámetros $\beta_0, \beta_1$de la siguiente ecuación:
+
+$$y = \beta_0 + \beta_1 x + \epsilon$$
+
+Donde y es la variable objetivo, x la variable price.index, $\beta_0$ es la ordenada en el origen, $\beta_1$ es la pendiente, y $\epsilon$ es el error.
+
+Para estimar el modelo de regresión simple, utilizaremos la función lm, que nos permite ajustar un modelo lineal. En este caso, la variable dependiente es y, y la variable independiente es price.index.
+
+```{r}
+modelo1 <- lm(y ~ price.index, data = freeny)
+summary(modelo1)
+```
+Podemos ver como el modelo se ha ajustado bien, ya que el valor de R cuadrado es 0.9791, lo que significa que el 97.9% de la variabilidad de la variable dependiente es explicada por la variable independiente. Además, el p-valor es muy bajo, lo que significa que la variable independiente es significativa.
+
+### 1.3 Obtener intervalos de confianza de los parámetros
+
+Para obtener los intervalos de confianza de los parámetros, utilizaremos la función confint, que nos permite obtener los intervalos de confianza de los parámetros del modelo. En este caso, queremos obtener los intervalos de confianza del 95% de los parámetros del modelo.
+
+```{r}
+intervalos_conf <- confint(modelo1, level = 0.95)
+round(intervalos_conf, 3)
+```
+Podemos interpretar la tabla de la siguiente manera:
+  - Intercept: El intervalo de confianza del 95% para el parámetro $\beta_0$ es (19.324, 20.348). Esto significa que con un 95% de confianza, el valor real del parámetro $\beta_0$ estará entre 19.324 y 20.348
+  - price.index: El intervalo de confianza del 95% para el parámetro $\beta_1$ es (-2.456, -2.228). Esto significa que con un 95% de confianza, el valor real del parámetro $\beta_1$ estará entre -2.456 y -2.228
+  
+Esto quiere decir que la relación entre la variable dependiente y la variable independiente es significativa, ya que el intervalo de confianza no incluye el 0. Además, que la relacción es negativa, pero eso ya lo pudimos observar en la matriz de covarianzas y correlaciones.
+
+### 1.4 Evaluar coeficiente de determinación y residuos
+
+Para obtener $R^2$ y los residuos del modelo, utilizaremos las funciones summary y residuals.
+
+```{r}
+r_sq1 <- summary(modelo1)$r.squared
+res1 <- residuals(modelo1)
+print(paste0("Tenemos un R cuadrado de: ", r_sq1))
+```
+Como ya hemos explicado, este valor al ser muy cercano a 1, significa que el modelo se ajusta muy bien a los datos.
+
+Los residuos deberían cumplir con estos supuestos básicos:
+  - Media cercana a cero.
+  - Distribución normal.
+  - Varianza constante (homocedasticidad).
+  - Independencia (especialmente importante en series temporales).
+
+Para analizar grafícamente estos puntos  podemos utilizar la funcion plot, que nos permite ver la distribución de los residuos, y la función acf, que nos permite ver la autocorrelación de los residuos. Aunque también podemos utilizar test estadísticos como el test de Shapiro y Durbin-Watson, que nos permite ver si existe normalidad o hay autocorrelación en los residuos respectivamente.
+
+```{r}
+par(mfrow = c(2, 2))
+plot(modelo1)
+```
+
+Podemos ver en el Q-Q plot que los residuos no parecen ajustarse a un normal, vamos a comprobar con el test de Shapiro-Wilk si podemos rechazar la hipótesis nula de que los residuos siguen una distribución normal.
+```{r}
+print(paste0("Los residuos tienen media: ",round(mean(res1),4)))
+shapiro.test(res1)
+```
+Vemos que el $p-value$ es $0.04781$ que es menor a $0.05$, por lo que podemos rechazar la hipótesis nula de que los residuos siguen una distribución normal. Como nuestro problema tiene una cantidad de observaciones elevada, debido al teorema central del límite, podemos dejar pasar por alto este supuesto.
+
+Vamos a comprobar si existe heterocedasticidad en los residuos, es decir, si la varianza de los residuos es constante. Para ello, utilizaremos el test de Breusch-Pagan, que nos permite ver si la varianza de los residuos es constante.
+
+```{r}
+bptest(modelo1)
+```
+El $p-value$ es $0.2741$, por lo que no podemos rechazar la hipótesis nula de que la varianza de los residuos es constante. Por lo que podemos decir que no hay heterocedasticidad en los residuos.
+
+Para comprobar si los residuos son independientes, utilizaremos el test de Durbin-Watson, que nos permite ver si hay autocorrelación en los residuos.
+```{r}
+durbinWatsonTest(modelo1)
+```
+El valor de Durbin-Watson es $0.3473076$, que está lejos de $2$, por lo que podemos decir que los residuos estan correlacionados, esto incumple uno de los supuestos básicos del modelo. En nuestro conjunto de datos esto no sorprende, ya que los valores de ventas de un trimestre dependen directamente del trimestre anterior. Esto indica que aunque el $R^2$ sea alto, el modelo no es el más adecuado para predecir las ventas o que debemos realizar transformaciones en las variables.
+
+
+### 1.5 Realizar el contraste de si la relación entre precios y ventas de freeny es negativa con un nivel de significación del 0.05
+
+Para realizar el contraste de si la relación entre precios y ventas de freeny es negativa, utilizaremos el test de hipótesis. La hipótesis nula es que la relación entre precios y ventas de freeny es positiva, y la hipótesis alternativa es que la relación entre precios y ventas de freeny es negativa.
+
+Es decir $H_0 : \beta_{price.index}\geq 0$ y $H_1 : \beta_{price.index}< 0$ , si el $p-value < 0.05 $ podemos rechazar la hipotesis nula y aceptar la hipotesis alternativa.
+
+```{r}
+summary(modelo1)
+```
+
+Podemos ver que el $p-value$ es $< 2.2e-16$, pero nuestro modelo evalua ambas colas, ya que supone normalidad, para analizar solo una de ellas debemos tomar la mitad del $p-value$.
+
+```{r}
+p_value2 <- summary(modelo1)$coefficients[2,4]/2
+print(paste0("El p-value unilateral corresponde a: ",p_value2))
+```
+Esto implica que podemos rechazar la hipotesis nula y aceptar la hipotesis alternativa, es decir, que la relación entre precios y ventas de freeny es negativa. De cualquier forma, el análisis de los residuos nos indica que el modelo no es el más adecuado para predecir las ventas, por lo que quizá con otro modelo encontramos otra evicendia.
+  
+## 2. Regresión múltiple
+
+### 2.1 Estimar el mejor modelo de regresión multiple.
+
+Para realizar el mejor modelo de regresión multiple podemos utilizar varios métodos, como el método de selección de variables hacia adelante, hacia atrás, o el método de selección de variables por pasos. En este caso, utilizaremos el método de selección de variables por pasos, que nos permite seleccionar las variables más significativas para el modelo. Para realizar este modelo, necesitamos definir un criterio de selección, en este caso utilizaremos el criterio de Akaike (AIC).
+
+Contruimos primero el modelo completo, y luego utilizamos la función step para seleccionar las variables más significativas.
+```{r}
+modelo_full <- lm(y ~ lag.quarterly.revenue + price.index + income.level + market.potential, data = freeny)
+summary(modelo_full)
+```
+Vemos en el summary del movelo que las variables mas significativas son price.index e income.level, parece que lag.quarterly.revenue y market.potential no aportan mucho al modelo. De cualquier forma, vamos a utilizar la función step para seleccionar las variables más significativas.
+
+Podemos ver que el modelo seleccionado es el siguiente:
+```{r}
+modelo_optimo <- step(modelo_full, direction = "both")
+summary(modelo_optimo)
+```
+Tenemos un R cuadrado de 0.998 y un R cuadarado ajustado de 0.997, lo que significa que el modelo se ajusta muy bien a los datos. Además, el p-valor de las variables es muy bajo, lo que significa que las variables son significativas. Podemos ver los gráficos de los residuos y realizar los test de normalidad, heterocedasticidad y autocorrelación, como realizamos en el modelo anterior.
+
+```{r}
+par(mfrow = c(2,2))
+plot(modelo_optimo)
+```
+En los gráficos podemos apreciar que los residuos siguen una distribución normal, la varianza de los residuos es constante y no hay autocorrelación en los residuos. Realizaremos los test pertinentes ya que graficamente puede no ser 100% fiable.
+
+```{r}
+r_sq2 <- summary(modelo_optimo)$r.squared
+res2 <- residuals(modelo_optimo)
+print(paste0("Los residuos tienen media: ",round(mean(res2),4)))
+shapiro.test(res2)
+```
+El test de Shapiro-Wilk nos da un $p-value$ de $0.636$, por lo que no podemos rechazar la hipótesis nula de que los residuos siguen una distribución normal. Es decir, los residuos siguen una distribución normal.
+
+```{r}
+bptest(modelo_optimo)
+```
+El test de Breusch-Pagan nos da un $p-value$ de $0.2653$, por lo que no podemos rechazar la hipótesis nula de que la varianza de los residuos es constante. Es decir, la varianza de los residuos es constante (homocedasticidad).
+
+```{r}
+durbinWatsonTest(modelo_optimo)
+```
+El valor de Durbin-Watson es $1.667245$, que está cerca de $2$, por lo que podemos decir que los residuos no están fuertemente correlacionados.
+
+A diferencia del modelo anterior, no solo tenemos un valor bueno del $R^2$ y $R^2$ ajustado, sino que los residuos cumplen con los supuestos básicos del modelo, por lo que este modelo es mejor que el anterior.
+
+### 2.2 Mejora el modelo utilizando GLM
+
+Para mejorar el modelo utilizando GLM, utilizaremos la función glm, que nos permite ajustar un modelo lineal generalizado. En este caso, utilizaremos la familia de distribución gaussiana, ya que estamos trabajando con una variable continua.
+
+```{r}
+modelo_glm_full <- glm(y ~ lag.quarterly.revenue + price.index + income.level + market.potential, data = freeny, family = gaussian())
+modelo_nulo <- glm(y ~ 1, data=freeny, family=gaussian())
+
+modelo_glm <- step(modelo_glm_full, direction = "both")
+pseudoR2 <- 1 - (modelo_glm$deviance / modelo_nulo$deviance)
+cat("\n")
+print(paste0("El pseudo R cuadrado es: ",pseudoR2))
+summary(modelo_glm)
+```
+Hemos utilizado el método step otra vez midiendo el AIC, tenemos un modelo que relaciona price.index, income.level y market.potential con las ventas de freeny. Podemos ver que el modelo se ajusta muy bien a los datos, ya que el pseudo $R^2$ es $0.998$, en el modelo anterior tenemos un $R^2$ de $0.998$, por lo que ambos modelos se ajustan muy bien a los datos.
+
+### 2.3 Estime el mismo por un procedimiento Bayesiano, y indique si este método de estimación mejora los resultados de los anteriores métodos.
+  
+```{r message=FALSE, warning=FALSE, echo=TRUE, results='hide'}
+modelo_bayes <- stan_glm(y ~ price.index + income.level + market.potential,
+                         data = freeny,
+                         family = gaussian(),
+                         seed = seed)
+```
+
+```{r}
+summary(modelo_bayes)
+```
+  El modelo Bayesiano nos acota los intervalos en los que se mueve la muestra y podemos interpretar de forma probabilistica los parámetros. Para saber si el modelo creado es bueno, podemos comprobar LOO, que realiza un leave-one-out cross-validation, y nos da una estimación de la capacidad predictiva del modelo. Además, podemos ver los intervalos de credibilidad del 95% de los parámetros del modelo, y los gráficos de las áreas de credibilidad del 95% de los parámetros del modelo.
+
+Vamos a obtener el WAIC, que es la versión de AIC para modelos bayesianos, y nos permite comparar modelos bayesianos. Cuanto menor sea el WAIC, mejor será el modelo.
+```{r}
+loo_bayes <- waic(modelo_bayes)
+print(waic(modelo_bayes))
+```
+
+Obtenemos un WAIC de $-212.1$ y en el modelo GLM teníamos un AIC $-212.8$ por lo que al ser un valor menor el del modelo bayesiano, podemos decir que es mejor que el modelo GLM.
+
+### 2.4 Calcule las distancias de cook, si lo considera conveniente realice una estimación robusta. Justifique su decisión.
+  
+Para calcular las distancias de cook, utilizaremos la función cooks.distance, que nos permite calcular las distancias de cook. Las distancias de cook nos permiten ver la influencia de cada observación en el modelo. Si la distancia de cook es mayor a 1, la observación es influyente, y si la distancia de cook es mayor a 4/n, la observación es muy influyente.
+
+```{r}
+# Distancias de Cook
+cooks_dist <- cooks.distance(modelo_optimo)
+round(cooks_dist, 4)
+plot(cooks_dist, type="h", 
+     main="Distancias de Cook",
+     ylab="Distancia de Cook",
+     xlab="Observaciones")
+abline(h=4/nrow(freeny), col="red", lty=2) # Umbral para observaciones muy influyentes
+abline(h=1, col="blue", lty=2)
+
+```
+
+Como hay una observación que supera el umbral de 4/n, vamos a realizar una estimación robusta utilizando la función rlm, que nos permite ajustar un modelo lineal robusto.
+
+```{r}
+modelo_robusto <- rlm(y ~ price.index + income.level + market.potential, data=freeny)
+summary(modelo_robusto)
+```
+Vamos a comparar los coeficientes de ambos modelos.
+
+```{r}
+summary(modelo_glm)$coefficients
+```
+La estabilidad entre ambos modelos confirma la fiabilidad del modelo robusto, en el que hemos evitado la influyencia elevada de una de las observaciones.
+
+### 2.5 A la vista de las variables explicativas cree que sería más adecuado estimar el modelo utilizando la regresión ridge o el mínimo cuadrado ordinario. En caso afirmativo estime el modelo y analice sus resultados.
+
+El modelo ridge es un modelo de regresión lineal que utiliza la regularización L2, que nos permite reducir la complejidad del modelo y evitar el sobreajuste. Es adeacuado cuando tenemos multicolinealidad en las variables explicativas, ya que reduce la varianza de los coeficientes. Para ver si es conveniente utilizar este modelo, podemos comprobar la multicolinealidad de las variables explicativas utilizando la función vif, que nos permite ver el factor de inflación de la varianza de las variables explicativas.
+
+```{r}
+vif(modelo_glm)
+```
+
+Como estamos obteniendo valores muy altos de VIF, podemos decir que hay multicolinealidad en las variables explicativas, por lo que sería más adecuado estimar el modelo utilizando la regresión ridge. Para estimar el modelo utilizando la regresión ridge, utilizaremos la función glmnet, que nos permite ajustar un modelo de regresión ridge.
+
+```{r}
+X <- model.matrix(y ~ price.index + income.level + market.potential, data=freeny)[,-1]
+y <- as.numeric(freeny$y)
+
+# Estimación del modelo Ridge (alpha=0 para Ridge)
+set.seed(seed)
+modelo_ridge <- cv.glmnet(X, y, alpha=0)
+
+coef(modelo_ridge, s="lambda.min")
+```
+Vemos que los coeficientes son muy similares a los del modelo GLM, disminuyendo sus valores, por lo que se puede apreciar la penalización de la regularización L2 para reducir la varianza. Podemos calcular el $R^2$ del modelo ridge para ver si mejora el modelo GLM.
+
+```{r}
+pred_ridge <- predict(modelo_ridge, s = "lambda.min", newx = X)
+SSE <- sum((y - pred_ridge)^2)
+SST <- sum((y - mean(y))^2)
+
+R2_ridge <- 1 - (SSE / SST)
+R2_ridge
+```
+Obtenemos un $R^2$ de $0.996$, muy similar al modelo GLM aunque menor. La diferencia no es sustancial.
+
+## 3. Estimar modelo que relacione el precio de freeny con las ventas de freeny, utilizando polinomios.
+
+Vamos a realizar el modelo polinómico de grado 2 y grado 3 los compararemos. 
+
+```{r}
+# Ajustar modelo polinómico grado 2
+modelo_poly2 <- lm(y ~ poly(price.index, 2, raw=TRUE), data=freeny)
+summary(modelo_poly2)
+```
+
+```{r}
+# Modelo polinómico grado 3
+modelo_poly3 <- lm(y ~ poly(price.index, 3, raw=TRUE), data=freeny)
+summary(modelo_poly3)
+```
+Podemos ver como el R cuadrado ajustado es muy similar en ambos casos, pero el P-value de lso coeficientes del modelo de grado 3 indica que no son significativos, por lo que el modelo de grado 2 es claramente mejor.
+
+Analizaremos el modelo polinomial de grado 2.
+
+```{r}
+summary(modelo_poly2)
+```
+Podemos ver como el intercepto es negativo y, esto quiere decir que potencialmente si el precio fuse 0, las ventas serían 0 (ya que no tiene sentido promedio de ventas -20). El coeficiente lineal nos indica que segun aumenta el precio las ventas aumentan considerablemente. Y el coeficiente cuadrático nos indica que la relación no es lineal, que llega un punto de la subida de precios que puede estancar las ventas y llegar a disminuirlas. 
+
+```{r}
+summary(modelo_poly2)$r.squared
+```
+Tenemos un $R^2$ de 0.98 que es menor que el obtenido con el modelo GLM. Veamos los gráficos del modelo
+
+```{r}
+par(mfrow=c(2,2))
+plot(modelo_poly2)
+```
+Podemos ver como los residuos siguen una distribución se ajustan a una distribución normal, la varianza parece constante entre 1 y 0.8, por lo que parece indicar que no hay heterocedasticidad, y el gráfico de la distancia de Cook vemos como no hay ninguna observación influyente.
+
+
+## 4. Cree una variable temporal relativa al año y otra relativa al trimestre. Realice un modelo ANOVA para las ventas utilizando el año y el trimestre, estime un modelo de ancova utilizando el precio como covariable.Comente los resultados.
+
+Para el modelo ANOVA, necesitamos hacer la transformación en el tiempo, para ello vamos a crear dos variables, una relativa al año y otra relativa al trimestre. Para ello, utilizaremos la función factor, que nos permite crear una variable categórica.
+
+```{r}
+freeny <- freeny %>%
+  mutate(Date = as.numeric(rownames(.))) %>%
+  mutate(Year = floor(Date),
+         Quarter = (Date - Year) * 4 + 1)
+
+freeny$Year <- factor(freeny$Year)
+freeny$Quarter <- factor(freeny$Quarter)
+
+anova_model <- aov(y ~ Year + Quarter, data=freeny)
+summary(anova_model)
+```
+Ambas variables son claramente significativas, por lo que podemos decir que el año y el trimestre influyen en las ventas.
+
+Vamos a realizar ahora el modelo ANCOVA utilizando el precio como covariable.
+
+```{r}
+modelo_ancova <- lm(y ~ Year + Quarter + price.index, data=freeny)
+
+summary(modelo_ancova)
+anova(modelo_ancova)
+```
+
+Parece que todas las variables son significativas, el valor del $R^2$ ajustado es $0.99$, por lo que el modelo parece tener una gran capacidad predictiva. Analicemos ahora los residuos para comprobar si cumplen con los criterios.
+
+```{r}
+par(mfrow=c(2,2))
+plot(modelo_ancova)
+```
+Parece que la media es cercana a 0, la distribución de los residuos no parece ser del todo bien ajustada y la varianza parece que disminuye cuando aumenta el precio, además hay una observación que esta por encima de 0.5 en la distancia de Cook.
+
+```{r}
+res_anco <- residuals(modelo_ancova)
+print(paste0("Los residuos tienen media: ",round(mean(res_anco),4)))
+shapiro.test(res_anco)
+```
+El test de Shapiro-Wilk nos da un $p-value$ de $0.8464$, por lo que no podemos rechazar la hipótesis nula de que los residuos siguen una distribución normal. Es decir, los residuos siguen una distribución normal.
+
+```{r}
+ncvTest(modelo_ancova)
+```
+El test de Non-constant Variance Score Test  nos da un $p-value$ de $0.76687$, por lo que no podemos rechazar la hipótesis nula de que la varianza de los residuos es constante. Es decir, la varianza de los residuos es constante (homocedasticidad).
+
+```{r}
+durbinWatsonTest(modelo_ancova)
+```
+El valor de Durbin-Watson es $2.0241$, que está cerca de $2$, por lo que podemos decir que los residuos no están fuertemente correlacionados.
+
+Es decir, los test nos confirman que se cumplen los supuestos básicos del modelo, por lo que el modelo ANCOVA es adecuado para predecir las ventas.
